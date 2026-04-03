@@ -8,6 +8,12 @@ const lobbyRoutes = require("./routes/lobbies");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const isProduction = process.env.NODE_ENV === "production";
+
+// Trust proxy (Render ke peeche hai)
+if (isProduction) {
+  app.set("trust proxy", 1);
+}
 
 // Middleware
 app.use(express.json());
@@ -19,13 +25,14 @@ app.use(
 );
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    secret: process.env.SESSION_SECRET || "dev-secret",
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false, // true in production (HTTPS)
+      secure: isProduction,
       httpOnly: true,
       maxAge: 60 * 60 * 1000, // 1 hour
+      sameSite: isProduction ? "none" : "lax",
     },
   })
 );
