@@ -1,25 +1,49 @@
 const express = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
 const router = express.Router();
 
-// POST /auth/login - Direct Access Grant (username + password)
-router.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+// GET /auth/login - Redirect to IFS Keycloak login page
+router.get("/login", (req, res) => {
+  const state = crypto.randomBytes(16).toString("hex");
+  req.session.oauth_state = state;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Username and password are required" });
+  const params = new URLSearchParams({
+    client_id: process.env.IFS_CLIENT_ID,
+    redirect_uri: process.env.IFS_REDIRECT_URI,
+    response_type: "code",
+    scope: "openid",
+    state,
+  });
+
+  res.json({
+    authUrl: `${process.env.IFS_AUTH_URL}?${params.toString()}`,
+  });
+});
+
+// GET /auth/callback - Handle OAuth callback, exchange code for tokens
+router.get("/callback", async (req, res) => {
+  const { code, state } = req.query;
+
+  if (!code) {
+    return res.status(400).json({ error: "Authorization code missing" });
   }
+
+  if (state !== req.session.oauth_state) {
+    return res.status(403).json({ error: "Invalid state parameter" });
+  }
+
+  delete req.session.oauth_state;
 
   try {
     const tokenResponse = await axios.post(
       process.env.IFS_TOKEN_URL,
       new URLSearchParams({
-        grant_type: "password",
+        grant_type: "authorization_code",
         client_id: process.env.IFS_CLIENT_ID,
         client_secret: process.env.IFS_CLIENT_SECRET,
-        username,
-        password,
-        scope: "openid",
+        code,
+        redirect_uri: process.env.IFS_REDIRECT_URI,
       }),
       {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -29,7 +53,6 @@ router.post("/login", async (req, res) => {
     const { access_token, refresh_token, expires_in, token_type } =
       tokenResponse.data;
 
-    // Store tokens in session
     req.session.access_token = access_token;
     req.session.refresh_token = refresh_token;
 
@@ -41,7 +64,7 @@ router.post("/login", async (req, res) => {
   } catch (error) {
     const status = error.response?.status || 500;
     const message =
-      error.response?.data?.error_description || "Login failed";
+      error.response?.data?.error_description || "Token exchange failed";
     res.status(status).json({ error: message });
   }
 });
