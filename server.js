@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
-const RedisStore = require("connect-redis").default;
+const { RedisStore } = require("connect-redis");
 require("dotenv").config();
 
 const { redis } = require("./lib/redis");
