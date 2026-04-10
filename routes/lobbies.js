@@ -1,25 +1,10 @@
 const express = require("express");
 const axios = require("axios");
 const authMiddleware = require("../middleware/auth");
-const { getCache, setCache } = require("../lib/redis");
 const router = express.Router();
-
-const CACHE_TTL = {
-  LOBBIES: 600,      // 10 min
-  LOBBY_PAGE: 600,   // 10 min
-  KPI: 300,          // 5 min
-};
 
 // GET /api/lobbies - Fetch ALL lobbies from IFS (auto-paginate)
 router.get("/lobbies", authMiddleware, async (req, res) => {
-  // Check cache first
-  const cacheKey = "lobbies:all";
-  const cached = await getCache(cacheKey);
-  if (cached) {
-    console.log("Lobbies served from cache");
-    return res.json(cached);
-  }
-
   const batchSize = 500;
   let allLobbies = [];
   let skip = 0;
@@ -52,14 +37,10 @@ router.get("/lobbies", authMiddleware, async (req, res) => {
       skip += batchSize;
     }
 
-    const result = {
+    res.json({
       value: allLobbies,
       "@odata.count": totalCount,
-    };
-
-    // Cache the result
-    await setCache(cacheKey, result, CACHE_TTL.LOBBIES);
-    res.json(result);
+    });
   } catch (error) {
     const status = error.response?.status || 500;
     const message = error.response?.data || "Failed to fetch lobbies";
@@ -72,14 +53,6 @@ router.get("/lobbies/:pageId/page", authMiddleware, async (req, res) => {
   const rawPageId = req.params.pageId;
   const pageId = rawPageId.replace(/^lobbyPage/i, "");
 
-  // Check cache first
-  const cacheKey = `lobby:page:${pageId}`;
-  const cached = await getCache(cacheKey);
-  if (cached) {
-    console.log(`Lobby page ${pageId} served from cache`);
-    return res.json(cached);
-  }
-
   try {
     const url = `${process.env.IFS_HOST}/main/ifsapplications/web/server/lobby/page/${pageId}`;
 
@@ -90,8 +63,6 @@ router.get("/lobbies/:pageId/page", authMiddleware, async (req, res) => {
       },
     });
 
-    // Cache the result
-    await setCache(cacheKey, response.data, CACHE_TTL.LOBBY_PAGE);
     res.json(response.data);
   } catch (error) {
     const status = error.response?.status || 500;
@@ -110,13 +81,8 @@ router.post("/kpi/bulk", authMiddleware, async (req, res) => {
 
   try {
     const results = await Promise.all(
-      ids.map(async (id) => {
-        // Check cache for each KPI
-        const cacheKey = `kpi:${id}`;
-        const cached = await getCache(cacheKey);
-        if (cached) return cached;
-
-        return axios
+      ids.map((id) =>
+        axios
           .get(
             `${process.env.IFS_HOST}/main/ifsapplications/projection/v1/KPIDetailsHandling.svc/CentralKpiSet(Id='${id}')`,
             {
@@ -126,16 +92,13 @@ router.post("/kpi/bulk", authMiddleware, async (req, res) => {
               },
             }
           )
-          .then(async (r) => {
-            const kpi = { Id: r.data.Id || id, Measure: r.data.Measure };
-            await setCache(cacheKey, kpi, CACHE_TTL.KPI);
-            return kpi;
+          .then((r) => {
+            return { Id: r.data.Id || id, Measure: r.data.Measure };
           })
-          .catch((err) => {
-            console.log(`KPI ${id} error:`, err.response?.status, err.response?.data?.error?.message || err.message);
+          .catch(() => {
             return null;
-          });
-      })
+          })
+      )
     );
 
     res.json({ kpis: results.filter(Boolean) });
