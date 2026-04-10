@@ -1,12 +1,16 @@
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const { getCache, setCache, delCache } = require("../lib/redis");
 const router = express.Router();
 
 // GET /auth/login - Redirect to IFS Keycloak login page
-router.get("/login", (req, res) => {
+router.get("/login", async (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
+
+  // Store state in both session and Redis (fallback for cross-site cookie issues)
   req.session.oauth_state = state;
+  await setCache(`oauth_state:${state}`, "valid", 600); // 10 min TTL
 
   const params = new URLSearchParams({
     client_id: process.env.IFS_CLIENT_ID,
@@ -29,11 +33,16 @@ router.get("/callback", async (req, res) => {
     return res.status(400).json({ error: "Authorization code missing" });
   }
 
-  if (state !== req.session.oauth_state) {
+  // Validate state from session first, then fallback to Redis
+  const sessionValid = state === req.session.oauth_state;
+  const redisValid = await getCache(`oauth_state:${state}`);
+
+  if (!sessionValid && !redisValid) {
     return res.status(403).json({ error: "Invalid state parameter" });
   }
 
   delete req.session.oauth_state;
+  await delCache(`oauth_state:${state}`);
 
   try {
     const tokenResponse = await axios.post(
