@@ -1,8 +1,10 @@
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
+const RedisStore = require("connect-redis").default;
 require("dotenv").config();
 
+const { redis } = require("./lib/redis");
 const authRoutes = require("./routes/auth");
 const lobbyRoutes = require("./routes/lobbies");
 
@@ -15,6 +17,25 @@ if (isProduction) {
   app.set("trust proxy", 1);
 }
 
+// Session config
+const sessionConfig = {
+  secret: process.env.SESSION_SECRET || "dev-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: isProduction,
+    httpOnly: true,
+    maxAge: 60 * 60 * 1000, // 1 hour
+    sameSite: isProduction ? "none" : "lax",
+  },
+};
+
+// Use Redis session store if available
+if (redis) {
+  sessionConfig.store = new RedisStore({ client: redis });
+  console.log("Using Redis session store");
+}
+
 // Middleware
 app.use(express.json());
 app.use(
@@ -23,19 +44,7 @@ app.use(
     credentials: true,
   })
 );
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "dev-secret",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: isProduction,
-      httpOnly: true,
-      maxAge: 60 * 60 * 1000, // 1 hour
-      sameSite: isProduction ? "none" : "lax",
-    },
-  })
-);
+app.use(session(sessionConfig));
 
 // Routes
 app.use("/auth", authRoutes);

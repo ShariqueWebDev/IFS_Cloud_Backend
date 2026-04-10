@@ -1,10 +1,25 @@
 const express = require("express");
 const axios = require("axios");
 const authMiddleware = require("../middleware/auth");
+const { getCache, setCache } = require("../lib/redis");
 const router = express.Router();
+
+const CACHE_TTL = {
+  LOBBIES: 600,      // 10 min
+  LOBBY_PAGE: 600,   // 10 min
+  KPI: 300,          // 5 min
+};
 
 // GET /api/lobbies - Fetch ALL lobbies from IFS (auto-paginate)
 router.get("/lobbies", authMiddleware, async (req, res) => {
+  // Check cache first
+  const cacheKey = "lobbies:all";
+  const cached = await getCache(cacheKey);
+  if (cached) {
+    console.log("Lobbies served from cache");
+    return res.json(cached);
+  }
+
   const batchSize = 500;
   let allLobbies = [];
   let skip = 0;
@@ -37,10 +52,14 @@ router.get("/lobbies", authMiddleware, async (req, res) => {
       skip += batchSize;
     }
 
-    res.json({
+    const result = {
       value: allLobbies,
       "@odata.count": totalCount,
-    });
+    };
+
+    // Cache the result
+    await setCache(cacheKey, result, CACHE_TTL.LOBBIES);
+    res.json(result);
   } catch (error) {
     const status = error.response?.status || 500;
     const message = error.response?.data || "Failed to fetch lobbies";
@@ -53,10 +72,16 @@ router.get("/lobbies/:pageId/page", authMiddleware, async (req, res) => {
   const rawPageId = req.params.pageId;
   const pageId = rawPageId.replace(/^lobbyPage/i, "");
 
+  // Check cache first
+  const cacheKey = `lobby:page:${pageId}`;
+  const cached = await getCache(cacheKey);
+  if (cached) {
+    console.log(`Lobby page ${pageId} served from cache`);
+    return res.json(cached);
+  }
+
   try {
     const url = `${process.env.IFS_HOST}/main/ifsapplications/web/server/lobby/page/${pageId}`;
-    console.log("--- LOBBY PAGE API ---");
-    console.log("URL:", url);
 
     const response = await axios.get(url, {
       headers: {
@@ -65,16 +90,10 @@ router.get("/lobbies/:pageId/page", authMiddleware, async (req, res) => {
       },
     });
 
-    console.log("STATUS:", response.status);
-    console.log("RESPONSE:", JSON.stringify(response.data, null, 2).slice(0, 2000));
-    console.log("--- END ---");
-
+    // Cache the result
+    await setCache(cacheKey, response.data, CACHE_TTL.LOBBY_PAGE);
     res.json(response.data);
   } catch (error) {
-    console.log("--- LOBBY PAGE ERROR ---");
-    console.log("STATUS:", error.response?.status);
-    console.log("ERROR:", JSON.stringify(error.response?.data, null, 2)?.slice(0, 1000));
-    console.log("--- END ---");
     const status = error.response?.status || 500;
     const message = error.response?.data || "Failed to fetch lobby page";
     res.status(status).json({ error: message });
@@ -91,39 +110,32 @@ router.post("/kpi/bulk", authMiddleware, async (req, res) => {
 
   try {
     const results = await Promise.all(
-      ids.map((id) =>
-        axios
+      ids.map(async (id) => {
+        // Check cache for each KPI
+        const cacheKey = `kpi:${id}`;
+        const cached = await getCache(cacheKey);
+        if (cached) return cached;
+
+        return axios
           .get(
-            `${process.env.IFS_HOST}/main/ifsapplications/projection/v1/KPIDetailsHandling.svc/CentralKpiSet`,
+            `${process.env.IFS_HOST}/main/ifsapplications/projection/v1/KPIDetailsHandling.svc/CentralKpiSet(Id='${id}')`,
             {
-              params: {
-                $select: "Measure",
-                $filter: `Id eq '${id}'`,
-                $top: 25,
-                $skip: 0,
-              },
               headers: {
                 Authorization: `Bearer ${req.session.access_token}`,
                 Accept: "application/json",
               },
             }
           )
-          .then((r) => {
-            // Inject the Id back since $select=Measure doesn't return it
-            const data = r.data;
-            if (data.value && data.value.length > 0) {
-              data.value[0].Id = id;
-            } else if (data.Measure !== undefined) {
-              data.Id = id;
-            }
-            console.log(`KPI ${id} OK:`, JSON.stringify(data).slice(0, 200));
-            return data;
+          .then(async (r) => {
+            const kpi = { Id: r.data.Id || id, Measure: r.data.Measure };
+            await setCache(cacheKey, kpi, CACHE_TTL.KPI);
+            return kpi;
           })
           .catch((err) => {
             console.log(`KPI ${id} error:`, err.response?.status, err.response?.data?.error?.message || err.message);
             return null;
-          })
-      )
+          });
+      })
     );
 
     res.json({ kpis: results.filter(Boolean) });
